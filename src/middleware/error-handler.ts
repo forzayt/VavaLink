@@ -52,6 +52,9 @@ export function createErrorHandler(options: ErrorHandlerOptions): ErrorRequestHa
     });
 
     if (!res.writableEnded) {
+      for (const [name, value] of Object.entries(typed.headers ?? {})) {
+        res.setHeader(name, value);
+      }
       res.status(typed.status).json({
         ...typed.toJSON(),
         requestId: req.id,
