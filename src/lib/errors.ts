@@ -17,6 +17,7 @@ export const ERROR_CODES = [
   'ENCODING_FAILED',
   'TIMEOUT',
   'CLIENT_ABORTED',
+  'METHOD_NOT_ALLOWED',
   'NOT_FOUND',
   'INTERNAL_ERROR',
 ] as const;
@@ -30,6 +31,8 @@ export interface VavaLinkErrorOptions {
   readonly cause?: unknown;
   /** Set to false to hide `message` from HTTP clients (defaults to true). */
   readonly expose?: boolean;
+  /** Extra headers the error response must carry (e.g. `Allow`). */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 export class VavaLinkError extends Error {
@@ -37,6 +40,7 @@ export class VavaLinkError extends Error {
   readonly status: number;
   readonly details: Record<string, unknown> | undefined;
   readonly expose: boolean;
+  readonly headers: Readonly<Record<string, string>> | undefined;
 
   constructor(
     code: ErrorCode,
@@ -50,6 +54,7 @@ export class VavaLinkError extends Error {
     this.status = status;
     this.details = options.details;
     this.expose = options.expose ?? true;
+    this.headers = options.headers;
     Error.captureStackTrace?.(this, new.target);
   }
 
@@ -143,6 +148,24 @@ export class ClientAbortedError extends VavaLinkError {
 export class RouteNotFoundError extends VavaLinkError {
   constructor(method: string, path: string) {
     super('NOT_FOUND', `Cannot ${method} ${path}`, 404);
+  }
+}
+
+/**
+ * 405 - the path exists but not for this method. Carries `Allow` and, in
+ * `details.example`, a ready-to-paste request so clients stop guessing.
+ */
+export class MethodNotAllowedError extends VavaLinkError {
+  constructor(method: string, path: string, allow: readonly string[], example?: string) {
+    super('METHOD_NOT_ALLOWED', `Cannot ${method} ${path}; use ${allow.join(', ')}`, 405, {
+      headers: { Allow: allow.join(', ') },
+      details: {
+        method,
+        path,
+        allowed: allow,
+        ...(example === undefined ? {} : { example }),
+      },
+    });
   }
 }
 

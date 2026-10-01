@@ -66,7 +66,7 @@ export function createAudioRouter(context: AppContext): Router {
     let session: EncodedAudio | undefined;
 
     try {
-      const payload = audioRequestSchema.safeParse(req.body);
+      const payload = parseAudioRequest(req.body);
       if (!payload.success) {
         throw new ValidationError('Invalid request body', {
           details: {
