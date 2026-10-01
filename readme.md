@@ -1,3 +1,3 @@
-#VavaLink
+# VavaLink
 
-#Lightweight audio infrastructure for Discord.
+### Lightweight audio infrastructure for Discord.
