@@ -72,12 +72,19 @@ export class AudioPipeline {
   /**
    * Open a track's audio and start transcoding it.
    *
-   * Resolves as soon as ffmpeg is running; the caller streams `stream`.
+   * Prefers `source.openDownload` (live yt-dlp download piped to ffmpeg's
+   * stdin) when the source offers it, so fragile CDN URLs never change hands;
+   * falls back to `source.open` (URL/file) otherwise. Resolves as soon as
+   * ffmpeg is running; the caller streams `stream`.
    */
   async encode(request: EncodeRequest): Promise<EncodedAudio> {
     const { track, source, encoding, signal } = request;
 
-    const input = await source.open(track, {
+    const opener: TrackSource['open'] =
+      typeof source.openDownload === 'function'
+        ? source.openDownload.bind(source)
+        : source.open.bind(source);
+    const input = await opener(track, {
       timeoutMs: request.openTimeoutMs ?? 20_000,
       signal,
     });

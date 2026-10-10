@@ -387,9 +387,6 @@ async function streamAudio(
       throw new ClientAbortedError('Client closed the connection');
     }
 
-    setStreamHeaders(res, resolved.track, encoding, resolved.tookMs);
-    res.status(200);
-
     session = await context.pipeline.encode({
       track: resolved.track,
       source: resolved.source,
@@ -397,6 +394,13 @@ async function streamAudio(
       signal: controller.signal,
       openTimeoutMs: context.config.search.timeoutMs,
     });
+
+    // Headers only after the encoder is ready: a resolve/open/ffmpeg failure
+    // before the first byte must still surface as a clean JSON error, not a
+    // JSON body mislabeled `audio/mpeg`. (Nothing is flushed until the first
+    // body write, so the error handler can still negotiate.)
+    setStreamHeaders(res, resolved.track, encoding, resolved.tookMs);
+    res.status(200);
 
     log.info('streaming track', {
       source: resolved.track.sourceName,

@@ -11,13 +11,15 @@
  * phase can swap in a persistent process pool without changing this interface.
  */
 
+import { spawn, type ChildProcess } from 'node:child_process';
 import { z } from 'zod';
 
 import { checkBinary, runProcess } from '../audio/ffmpeg.js';
 import type { YtDlpSourceConfig } from '../config.js';
 import { AbortScope, abortReason } from '../lib/async.js';
-import { SourceUnavailableError, TrackUnavailableError, VavaLinkError } from '../lib/errors.js';
+import { SourceError, SourceUnavailableError, TrackUnavailableError, VavaLinkError } from '../lib/errors.js';
 import type { Logger } from '../lib/logger.js';
+import { tailLines } from '../lib/text.js';
 import { isRemoteUrl } from './direct.js';
 import { decodeTrackIdentifier, encodeTrackIdentifier } from './identifier.js';
 import {
@@ -219,6 +221,155 @@ export class YtDlpSource implements TrackSource {
     });
   }
 
+  /**
+   * Download-first open: spawn `yt-dlp -o -` and return its stdout as the
+   * audio stream. This is yt-dlp's documented streaming pattern — with
+   * `-o -` the media bytes go to stdout while all logging/progress stays on
+   * stderr — piped straight into ffmpeg's `-i pipe:0` (see
+   * `AudioPipeline.encode`, `buildFfmpegArgs`).
+   *
+   * Why this instead of handing ffmpeg the CDN URL from `open()`? Those URLs
+   * are locked to the resolving IP, expire within minutes, and need
+   * per-format headers — every handoff is a potential 403 race (exactly what
+   * we saw: IPv6 rotation, `itag=18` progressive picks, throttling from
+   * resolve+open+ffmpeg triple lookups). Here yt-dlp owns all YouTube HTTP
+   * (retries, throttling, cookies, `--force-ipv4`), and ffmpeg never touches
+   * `googlevideo.com` at all.
+   *
+   * Lifecycle: the child dies when the client aborts (`options.signal`), when
+   * no first byte arrives within `timeoutMs`, or when the returned stream is
+   * closed (the pipeline destroys it on dispose). A non-zero exit destroys
+   * the stream with the stderr tail so the real cause surfaces.
+   */
+  async openDownload(track: TrackInfo, options: OpenOptions): Promise<AudioStream> {
+    this.#assertEnabled();
+    if (options.signal?.aborted) throw abortReason(options.signal);
+    const target = this.#pageUrl(track);
+    const log = this.#logger;
+
+    let child: ChildProcess;
+    try {
+      child = spawn(
+        this.#config.binary,
+        [
+          ...this.#baseArgs(),
+          '--no-playlist',
+          '--no-progress',
+          '--socket-timeout',
+          '10',
+          '--retries',
+          '3',
+          '--fragment-retries',
+          '3',
+          '--no-part',
+          '--format',
+          this.#profile.formatSelector,
+          '-o',
+          '-',
+          target,
+        ],
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+    } catch (cause) {
+      throw new SourceUnavailableError(
+        `Failed to start "${this.#config.binary}": ${cause instanceof Error ? cause.message : String(cause)}`,
+        { cause },
+      );
+    }
+
+    const stdout = child.stdout;
+    const stderr = child.stderr;
+    if (!stdout || !stderr) {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      throw new SourceError('yt-dlp download pipes are unavailable', {
+        details: { source: this.name },
+      });
+    }
+
+    let stderrText = '';
+    stderr.setEncoding('utf8');
+    stderr.on('data', (chunk: string) => {
+      stderrText = `${stderrText}${chunk}`.slice(-8_000);
+    });
+
+    let dead = false;
+    const kill = (reason: string): void => {
+      if (dead) return;
+      dead = true;
+      clearTimeout(firstByteTimer);
+      try {
+        log.debug('stopping yt-dlp download', { reason });
+        child.kill('SIGTERM');
+        const timer = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* already gone */
+          }
+        }, 2_000);
+        timer.unref();
+      } catch {
+        /* already gone */
+      }
+    };
+
+    // `timeoutMs` is the deadline for the download to *start*, not finish.
+    const firstByteTimer = setTimeout(() => {
+      kill('open-timeout');
+      stdout.destroy(
+        new SourceError(`yt-dlp produced no audio data within ${options.timeoutMs}ms`, {
+          details: { source: this.name, uri: target, stderr: tailLines(stderrText) },
+        }),
+      );
+    }, options.timeoutMs);
+    firstByteTimer.unref();
+    stdout.once('data', () => clearTimeout(firstByteTimer));
+
+    child.once('error', (error: NodeJS.ErrnoException) => {
+      kill('spawn-error');
+      const code = error.code;
+      const message =
+        code === 'ENOENT'
+          ? `Executable not found: "${this.#config.binary}". Install it and make sure it is on your PATH.`
+          : `Failed to start "${this.#config.binary}": ${error.message}`;
+      stdout.destroy(new SourceUnavailableError(message, { cause: error }));
+    });
+
+    child.once('close', (exitCode) => {
+      clearTimeout(firstByteTimer);
+      if (dead) return; // killed by us (abort/dispose/timeout) — stream already handled
+      if (exitCode !== 0) {
+        stdout.destroy(
+          new SourceError(
+            `yt-dlp download failed with exit code ${exitCode ?? 'null'}`,
+            { details: { source: this.name, uri: target, stderr: tailLines(stderrText) } },
+          ),
+        );
+      }
+      // exit 0 + ended stdout is the normal end of the song.
+    });
+
+    options.signal?.addEventListener(
+      'abort',
+      () => {
+        kill('aborted');
+        stdout.destroy(options.signal?.reason as Error | undefined);
+      },
+      { once: true },
+    );
+
+    // The pipeline destroys this stream on dispose (client gone / song over /
+    // shutdown) — take the downloader with it so no orphan yt-dlp lingers.
+    stdout.once('close', () => kill('stream-closed'));
+
+    log.debug('yt-dlp download started', { uri: target, pid: child.pid });
+    return createAudioStream({ contentType: 'application/octet-stream', stream: stdout });
+  }
+
   async isAvailable(): Promise<SourceAvailability> {
     if (!this.#config.enabled) {
       return { available: false, reason: 'disabled by configuration' };
@@ -238,18 +389,12 @@ export class YtDlpSource implements TrackSource {
     return value;
   }
 
-  /** Run yt-dlp and parse its JSON payload. */
-  async #run(args: readonly string[], options: OpenOptions | SearchOptions): Promise<YtDlpInfo> {
-    const scope = AbortScope.create({
-      timeoutMs: this.#config.timeoutMs,
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
-
+  /** Shared CLI prefix: quiet, deterministic, IPv4-pinned unless overridden. */
+  #baseArgs(): string[] {
     const wantsIpFamily = this.#config.extraArgs.some(
       (arg) => arg === '--force-ipv4' || arg === '--force-ipv6' || arg === '-4' || arg === '-6',
     );
-
-    const fullArgs = [
+    return [
       '--ignore-config',
       '--no-colors',
       '--no-warnings',
@@ -261,8 +406,17 @@ export class YtDlpSource implements TrackSource {
       ...(wantsIpFamily ? [] : ['--force-ipv4']),
       ...(this.#config.jsRuntime ? ['--js-runtimes', this.#config.jsRuntime] : []),
       ...this.#config.extraArgs,
-      ...args,
     ];
+  }
+
+  /** Run yt-dlp and parse its JSON payload. */
+  async #run(args: readonly string[], options: OpenOptions | SearchOptions): Promise<YtDlpInfo> {
+    const scope = AbortScope.create({
+      timeoutMs: this.#config.timeoutMs,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+
+    const fullArgs = [...this.#baseArgs(), ...args];
 
     try {
       const result = await runProcess(

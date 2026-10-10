@@ -26,9 +26,21 @@ export interface ResolvedTrack {
   readonly tookMs: number;
 }
 
+/** Resolve metadata stays valid long enough to survive a page view. */
+const RESOLVE_CACHE_TTL_MS = 60_000;
+/** Cap on cached queries; oldest evicted first. */
+const RESOLVE_CACHE_MAX = 200;
+
 export class SourceChain {
   readonly #sources: readonly TrackSource[];
   readonly #logger: Logger;
+  /**
+   * Short-lived resolve cache: one player page fires resolve twice in parallel
+   * (`?format=json` metadata + the stream itself), and every resolve is a
+   * yt-dlp process hammering YouTube. Metadata goes stale slowly, so a 60s
+   * TTL is safe and halves lookup load. Bounded to cap memory.
+   */
+  readonly #resolveCache = new Map<string, { at: number; value: ResolvedTrack }>();
 
   constructor(sources: readonly TrackSource[], logger: Logger) {
     this.#sources = sources;
@@ -56,6 +68,13 @@ export class SourceChain {
       throw new NoMatchesError(request.query, consulted);
     }
 
+    const cacheKey = `${request.limit}:${query.toLowerCase()}`;
+    const cached = this.#resolveCache.get(cacheKey);
+    if (cached !== undefined && Date.now() - cached.at < RESOLVE_CACHE_TTL_MS) {
+      this.#logger.debug('resolve cache hit', { query, source: cached.value.source.name });
+      return cached.value;
+    }
+
     const searchOptions: SearchOptions = {
       limit: request.limit,
       timeoutMs: request.timeoutMs,
@@ -72,7 +91,14 @@ export class SourceChain {
       if (track !== undefined) {
         const tookMs = Math.round(performance.now() - startedAt);
         this.#logger.debug('resolved query', { query, source: source.name, tookMs });
-        return { track, source, consulted, tookMs };
+        const resolved: ResolvedTrack = { track, source, consulted, tookMs };
+        this.#resolveCache.set(cacheKey, { at: Date.now(), value: resolved });
+        while (this.#resolveCache.size > RESOLVE_CACHE_MAX) {
+          const oldest = this.#resolveCache.keys().next();
+          if (oldest.done) break;
+          this.#resolveCache.delete(oldest.value);
+        }
+        return resolved;
       }
     }
 

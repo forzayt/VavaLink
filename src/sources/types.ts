@@ -87,6 +87,13 @@ export interface TrackSource {
   search(query: string, options: SearchOptions): Promise<readonly TrackInfo[]>;
   /** Turn a track into a playable audio stream. */
   open(track: TrackInfo, options: OpenOptions): Promise<AudioStream>;
+  /**
+   * Download-first open for sources whose URLs are fragile (IP-locked,
+   * expiring, header-gated). Returns a *live download stream* for ffmpeg's
+   * stdin instead of a URL. The pipeline prefers this when present; `open`
+   * stays for callers that need a URL (e.g. `?format=json`).
+   */
+  openDownload?(track: TrackInfo, options: OpenOptions): Promise<AudioStream>;
   /** Whether the source's external dependency is usable right now. */
   isAvailable(): Promise<SourceAvailability>;
 }
