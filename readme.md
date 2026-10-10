@@ -84,3 +84,13 @@ Liveness with ffmpeg/ffprobe/source checks (`?refresh=true` bypasses the 10s cac
 - `GET` streams exactly like `POST` — same resolver (`src/sources/chain.ts`), same ffmpeg pipeline (`src/audio/pipeline.ts`), same `499` handling on client disconnect.
 - Prefer the server stream URL over `playableUrl` for playback: CDN URLs are IP-locked and short-lived, while `/v1/audio/...` re-resolves on every request.
 - Streaming internals: yt-dlp downloads (`-o -`, documented stdout-streaming pattern) and pipes bytes into ffmpeg's stdin (`-i pipe:0`). ffmpeg never touches `googlevideo.com` directly, so there is no IP-lock/expiry/header race. yt-dlp is pinned to IPv4 by default (`--force-ipv4`; override with `YT_DLP_EXTRA_ARGS=--force-ipv6` on IPv6-only networks), prefers audio-only formats, and resolve metadata is cached 60s to avoid hammering YouTube (one player page = 1 resolve + 1 download instead of 4 lookups).
+
+## Deploy to Render
+
+`render.yaml` in the repo root is a ready blueprint (or copy its values into a manual service):
+
+- **Build command:** `npm install && npm run build && mkdir -p bin && curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o bin/yt-dlp && chmod +x bin/yt-dlp && ./bin/yt-dlp --version`
+- **Start command:** `npm start` (not `npm run dev`)
+- **Env:** `HOST=0.0.0.0`, `YT_DLP_PATH=bin/yt-dlp` (`PORT` is injected by Render; health check is `/`)
+
+Why each bit exists: Render's Node image has `ffmpeg`/`ffprobe` but **no `yt-dlp`** (without it, YouTube/SoundCloud report unavailable), and the server must bind `0.0.0.0:$PORT` — the `127.0.0.1` default is what causes `No open ports detected`.

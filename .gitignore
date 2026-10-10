@@ -5,6 +5,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Environment (real secrets stay out of git; commit only .env.example)
+.env
+.env.local
+.env.*.local
 
 # Logs
 logs/

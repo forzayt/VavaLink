@@ -1,0 +1,27 @@
+# Render blueprint: deploys VavaLink as a web service straight from this repo.
+# Either let Render detect this file on "New Blueprint", or copy the values
+# below into an existing manual service (Settings -> Build & Deploy +
+# Environment).
+services:
+  - type: web
+    name: vavalink
+    runtime: node
+    plan: free
+    # Render's Node image ships ffmpeg/ffprobe but NOT yt-dlp, so the build
+    # downloads the standalone Linux binary into ./bin and points the server
+    # at it. `npm run build` compiles src/ -> dist/ for `npm start`.
+    buildCommand: npm install && npm run build && mkdir -p bin && curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o bin/yt-dlp && chmod +x bin/yt-dlp && ./bin/yt-dlp --version
+    startCommand: npm start
+    # Render probes `/` and requires the server on 0.0.0.0:$PORT.
+    # $PORT is injected by Render; HOST must be 0.0.0.0 (the repo default
+    # 127.0.0.1 is what causes "No open ports detected").
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_LEVEL
+        value: info
+      - key: YT_DLP_PATH
+        value: bin/yt-dlp
