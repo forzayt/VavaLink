@@ -58,7 +58,7 @@ const envSchema = z.object({
   BINARY_PROBE_TIMEOUT_MS: z.coerce.number().int().min(100).default(5_000),
   /** Output sample rate every encoder targets. */
   SAMPLE_RATE: z.coerce.number().int().min(8_000).max(192_000).default(48_000),
-  CHANNELS: z.union([z.literal(1), z.literal(2)]).default(2),
+  CHANNELS: z.coerce.number().int().min(1).max(2).default(2),
   DEFAULT_ENCODING: z.enum(['mp3', 'pcm']).default('mp3'),
   MP3_BITRATE_KBPS: z.coerce.number().int().min(32).max(320).default(128),
   /** User agent sent to remote inputs; some CDNs reject ffmpeg's default. */

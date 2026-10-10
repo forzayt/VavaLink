@@ -314,7 +314,30 @@ class EncodeSession implements EncodedAudio {
         this.#logger.debug('ffmpeg spawned', { pid: process.child.pid });
       };
       const onData = (): void => settle(resolve);
-      const onEnd = (): void => settle(() => reject(new EncodingError('FFmpeg produced no audio')));
+      const onEnd = (): void => {
+        // `stdout` ends before the child `close` event fires, so wait for the
+        // `done` verdict — it carries exit code + stderr tail. Only fall back
+        // to the generic message if ffmpeg somehow exited cleanly with no data.
+        process.done.then(
+          () =>
+            settle(
+              () =>
+                reject(
+                  new EncodingError('FFmpeg produced no audio', {
+                    details: { stderr: process.stderr().slice(-2000) },
+                  }),
+                ),
+            ),
+          (error: unknown) =>
+            settle(() =>
+              reject(
+                error instanceof Error
+                  ? error
+                  : new EncodingError('FFmpeg failed before producing audio'),
+              ),
+            ),
+        );
+      };
       const onError = (error: Error): void => settle(() => reject(error));
 
       const timer = setTimeout(() => settle(resolve), FIRST_OUTPUT_TIMEOUT_MS);

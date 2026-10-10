@@ -245,10 +245,20 @@ export class YtDlpSource implements TrackSource {
       ...(options.signal ? { signal: options.signal } : {}),
     });
 
+    const wantsIpFamily = this.#config.extraArgs.some(
+      (arg) => arg === '--force-ipv4' || arg === '--force-ipv6' || arg === '-4' || arg === '-6',
+    );
+
     const fullArgs = [
       '--ignore-config',
       '--no-colors',
       '--no-warnings',
+      // Googlevideo CDN URLs are locked to the resolving IP. On hosts with
+      // rotating IPv6 privacy addresses yt-dlp and ffmpeg can egress from
+      // different IPs, and ffmpeg then gets `403 Forbidden`. Pinning IPv4 by
+      // default gives both processes the same stable address; override with
+      // YT_DLP_EXTRA_ARGS=--force-ipv6 on IPv6-only networks.
+      ...(wantsIpFamily ? [] : ['--force-ipv4']),
       ...(this.#config.jsRuntime ? ['--js-runtimes', this.#config.jsRuntime] : []),
       ...this.#config.extraArgs,
       ...args,
@@ -399,7 +409,14 @@ function selectFormat(info: YtDlpInfo): YtDlpFormat | undefined {
     (format) => format.url !== null && format.url !== undefined && format.acodec !== 'none',
   );
 
-  const ranked = playable.sort((a, b) => (b.abr ?? b.asr ?? 0) - (a.abr ?? a.asr ?? 0));
+  // Prefer audio-only formats (vcodec none): progressive video+audio renditions
+  // (e.g. itag 18) are larger, more aggressively guarded, and pointless when
+  // we run `-map 0:a:0` anyway. Within each group, highest bitrate wins.
+  const audioOnly = (format: YtDlpFormat): number =>
+    format.vcodec === 'none' || format.vcodec === null || format.vcodec === undefined ? 0 : 1;
+  const ranked = playable.sort(
+    (a, b) => audioOnly(a) - audioOnly(b) || (b.abr ?? b.asr ?? 0) - (a.abr ?? a.asr ?? 0),
+  );
   return ranked[0] ?? candidates.find((format) => format.url !== null && format.url !== undefined);
 }
 
