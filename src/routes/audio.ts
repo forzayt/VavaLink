@@ -144,7 +144,67 @@ async function handleGetAudio(
     return;
   }
 
+  // Browser address-bar navigation sends `Accept: text/html` and then stares
+  // at an empty tab for ~10s (two yt-dlp calls + ffmpeg buffering) before a
+  // single byte arrives. Serve an instant player page instead; its `<audio>`
+  // element holds the connection and starts playback when the stream is
+  // ready. `?raw=1` forces the raw audio stream (used by the page itself,
+  // curl, `<audio src>`, Discord, ...).
+  const rawParam = firstQueryParam(req.query['raw'] ?? req.query['play']);
+  const wantsRaw = rawParam !== undefined && /^(1|true|raw|audio)$/i.test(rawParam);
+  const accept = req.header('accept') ?? '';
+  if (!wantsRaw && accept.includes('text/html')) {
+    res.status(200).type('text/html; charset=utf-8').send(playerPage(req, query, encodingName));
+    return;
+  }
+
   await streamAudio(context, req, res, next, query, encodingName);
+}
+
+/** Minimal auto-playing page for browser navigations to a stream URL. */
+function playerPage(req: Request, query: string, encodingName: string): string {
+  const sep = (req.originalUrl ?? '').includes('?') ? '&' : '?';
+  const streamHref = `${req.originalUrl ?? req.path}${sep}raw=1`;
+  const metaHref = `${req.originalUrl ?? req.path}${sep}format=json`;
+  const esc = (value: string): string =>
+    value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VavaLink player</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; display: grid; place-items: center; min-height: 100vh; margin: 0; }
+  main { text-align: center; max-width: 28rem; padding: 2rem; }
+  h1 { font-size: 1.1rem; font-weight: 600; }
+  p { color: #999; font-size: 0.85rem; word-break: break-all; }
+  audio { width: 100%; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Loading…</h1>
+  <p id="source">${esc(query)} · ${esc(encodingName)}</p>
+  <audio controls autoplay preload="auto" src="${esc(streamHref)}"></audio>
+</main>
+<script>
+  fetch(${JSON.stringify(metaHref)}, { headers: { accept: 'application/json' } })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      if (!d || !d.track) return;
+      const label = d.track.author ? d.track.title + ' — ' + d.track.author : d.track.title;
+      document.title = label;
+      document.getElementById('title').textContent = label;
+    })
+    .catch(() => {});
+  document.querySelector('audio').addEventListener('playing', () => {
+    document.getElementById('title').textContent = document.title;
+  });
+</script>
+</body>
+</html>`;
 }
 
 /**

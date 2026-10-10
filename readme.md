@@ -40,6 +40,8 @@ Streams `audio/mpeg` (or `audio/L16`) chunked, with track metadata in `X-VavaLin
 http://127.0.0.1:3000/v1/audio/https://youtu.be/3sB4Iv_tM7U?encoding=pcm
 ```
 
+Pasting the URL into a Chrome address bar returns an instant auto-playing player page (the raw stream takes ~10s to start: two yt-dlp lookups + ffmpeg buffering). Append `?raw=1` to force the raw audio stream — use that form in `<audio src>`, Discord, VLC, and curl.
+
 ### `GET /v1/audio?query={link}` — for URLs with `?` and `&`
 
 Raw `youtube.com/watch?v=...&list=...` links cannot survive raw in a path segment (the `?` starts our own query string). Use a query param instead (also supports `?url=` / `?link=`):

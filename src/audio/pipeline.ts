@@ -243,15 +243,17 @@ class EncodeSession implements EncodedAudio {
     const process = spawnFfmpeg(this.#ffmpegPath, this.#args, { withStdin: usesStdin }, this.#logger);
     this.#process = process;
 
+    // Count from the very first byte (before the readiness gate consumes it)
+    // so `bytes()` in disconnect logs reflects what ffmpeg actually produced.
+    process.stdout.on('data', (chunk: Buffer) => {
+      this.#bytes += chunk.length;
+    });
+
     // Wait until ffmpeg is actually alive *and* producing audio before we let
     // the caller write a 200 to the client. Otherwise a missing binary or a
     // bad input URL would surface as a truncated response instead of a clean
     // 503/502 body.
     await this.#awaitReady(process);
-
-    process.stdout.on('data', (chunk: Buffer) => {
-      this.#bytes += chunk.length;
-    });
 
     process.stdout.on('error', (error: Error) => {
       this.stream.destroy(error);
